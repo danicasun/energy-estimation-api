@@ -1,0 +1,17 @@
+[Unit]
+Description=Job Prediction FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/compute-insights-stanford
+Environment=PYTHONPATH=/path/to/compute-insights-stanford
+Environment=ELECTRICITYMAPS_API_KEY=replace_with_key
+ExecStart=/path/to/compute-insights-stanford/.venv/bin/uvicorn job_prediction_api:app --host 0.0.0.0 --port 8001
+Restart=on-failure
+RestartSec=5
+# User=replace_with_user
+# Group=replace_with_group
+
+[Install]
+WantedBy=multi-user.target
