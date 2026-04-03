@@ -8,7 +8,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-export ELECTRICITYMAPS_API_KEY="your_key"
+export ELECTRICITYMAPS_API_KEY="xiXORcxkXP3ggwy4cc2v"
 python -m uvicorn job_prediction_api:app --host 0.0.0.0 --port 8001
 ```
 
