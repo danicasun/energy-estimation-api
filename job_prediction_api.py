@@ -193,6 +193,16 @@ def _build_prediction_response(inputs: Dict[str, Any]) -> Dict[str, Any]:
 app = FastAPI(title="Job Prediction API")
 
 
+@app.get("/")
+def root() -> Dict[str, str]:
+    """Health and discovery for bare deployment URLs (e.g. opening `/` on Vercel)."""
+    return {
+        "service": "Job Prediction API",
+        "docs": "/docs",
+        "predict": "POST /predict",
+    }
+
+
 @app.post("/predict", response_model=JobPredictionResponse)
 def predict_job(request: JobPredictionRequest) -> JobPredictionResponse:
     payload = _model_to_dict(request)
