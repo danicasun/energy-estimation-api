@@ -6,16 +6,13 @@ from typing import Optional
 from datetime import datetime
 
 
-API_TOKEN = "xiXORcxkXP3ggwy4cc2v"
-
-
 def get_carbon_intensity(zone: str, api_key: Optional[str] = None, timestamp: Optional[datetime] = None) -> Optional[float]:
     """
     Get current or historical carbon intensity for a zone.
     
     Args:
         zone: ElectricityMaps zone code (e.g., "US-CAL-CISO")
-        api_key: ElectricityMaps API key (defaults to ELECTRICITYMAPS_API_KEY env var, then DEFAULT_API_TOKEN)
+        api_key: ElectricityMaps API key (defaults to ELECTRICITYMAPS_API_KEY env var)
         timestamp: Optional datetime for historical data (defaults to current time)
         
     Returns:
@@ -23,9 +20,6 @@ def get_carbon_intensity(zone: str, api_key: Optional[str] = None, timestamp: Op
     """
     if not api_key:
         api_key = os.environ.get("ELECTRICITYMAPS_API_KEY")
-    
-    if not api_key:
-        api_key = API_TOKEN
     
     if not api_key:
         print("Warning: No API key available, using fallback value")
