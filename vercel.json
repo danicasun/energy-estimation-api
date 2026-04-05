@@ -1,0 +1,14 @@
+{
+    "builds": [
+        {
+            "src": "job_prediction_api.py",
+            "use": "@vercel/python"
+        }
+    ],
+    "routes": [
+        {
+            "src": "/(.*)",
+            "dest": "job_prediction_api.py"
+        }
+    ]
+}
