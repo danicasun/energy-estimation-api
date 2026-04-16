@@ -49,14 +49,26 @@ def parse_walltime_hours(raw_value: str) -> Optional[float]:
     hours = 0
     minutes = 0
     seconds = 0
-    if len(numeric_segments) == 3:
-        hours, minutes, seconds = numeric_segments
-    elif len(numeric_segments) == 2:
-        hours, minutes = numeric_segments
-    elif len(numeric_segments) == 1:
-        hours = numeric_segments[0]
+    if days > 0:
+        # Slurm with day prefix allows D-HH, D-HH:MM, and D-HH:MM:SS.
+        if len(numeric_segments) == 3:
+            hours, minutes, seconds = numeric_segments
+        elif len(numeric_segments) == 2:
+            hours, minutes = numeric_segments
+        elif len(numeric_segments) == 1:
+            hours = numeric_segments[0]
+        else:
+            return None
     else:
-        return None
+        # Slurm without day prefix treats one/two segments as MM or MM:SS.
+        if len(numeric_segments) == 3:
+            hours, minutes, seconds = numeric_segments
+        elif len(numeric_segments) == 2:
+            minutes, seconds = numeric_segments
+        elif len(numeric_segments) == 1:
+            minutes = numeric_segments[0]
+        else:
+            return None
 
     return days * 24 + hours + minutes / 60 + seconds / 3600
 
