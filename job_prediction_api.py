@@ -8,10 +8,12 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from energy_constants import POWER_USAGE_EFFECTIVENESS
 from electricitymaps import get_carbon_intensity
+from node_inventory import aggregate_allocated_nodes, lookup_node_profile
 from power_model import estimate_emissions
 from sbatch_parser import SbatchParameters, parse_sbatch_text
-from slurm_runtime import get_node_prefix
+from slurm_runtime import expand_slurm_nodelist, get_node_prefix, get_slurm_env_vars
 from zone_mapping import get_zone_for_node_prefix
 
 
@@ -26,6 +28,7 @@ class JobPredictionParameters(BaseModel):
     gpuCount: Optional[int] = None
     memoryGigabytes: Optional[float] = None
     walltimeHours: Optional[float] = None
+    nodelist: Optional[str] = None
 
 
 class JobPredictionRequest(BaseModel):
@@ -40,6 +43,7 @@ class JobPredictionResponse(BaseModel):
     emissions_gco2e: float
     power_watts: float
     carbon_intensity_gco2e_per_kwh: float
+    pue: float
     zone: str
     inputs: Dict[str, Any]
     notes: List[str]
@@ -53,13 +57,26 @@ def _parse_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(sbatch_text, str) and sbatch_text.strip():
         parsed_sbatch = parse_sbatch_text(sbatch_text)
 
-    cpu_cores = _coalesce_int(
-        parameters.get("cpuCores"),
-        _calculate_total_cpu_cores(parsed_sbatch),
-        1,
+    resolved_nodelist = _resolve_nodelist(parameters, parsed_sbatch)
+    allocated_node_names = expand_slurm_nodelist(resolved_nodelist)
+    node_inventory_aggregation = aggregate_allocated_nodes(allocated_node_names)
+
+    inferred_cpu_cores = _calculate_total_cpu_cores(parsed_sbatch)
+    if inferred_cpu_cores is None and node_inventory_aggregation.total_cpu_cores > 0:
+        inferred_cpu_cores = node_inventory_aggregation.total_cpu_cores
+
+    cpu_cores = _coalesce_int(parameters.get("cpuCores"), inferred_cpu_cores, 1)
+
+    inferred_gpu_count = parsed_sbatch.gpu_count if parsed_sbatch else None
+    if inferred_gpu_count is None and node_inventory_aggregation.total_gpu_count > 0:
+        inferred_gpu_count = node_inventory_aggregation.total_gpu_count
+    gpu_count = _coalesce_int(parameters.get("gpuCount"), inferred_gpu_count, 0)
+
+    node_count = _coalesce_int(
+        parameters.get("nodeCount"),
+        parsed_sbatch.node_count if parsed_sbatch else None,
+        len(allocated_node_names) if allocated_node_names else None,
     )
-    gpu_count = _coalesce_int(parameters.get("gpuCount"), parsed_sbatch.gpu_count if parsed_sbatch else None, 0)
-    node_count = _coalesce_int(parameters.get("nodeCount"), parsed_sbatch.node_count if parsed_sbatch else None, None)
     partition_name = _coalesce_str(
         parameters.get("partitionName"),
         parsed_sbatch.partition_name if parsed_sbatch else None,
@@ -80,7 +97,7 @@ def _parse_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if zone_override is not None and not isinstance(zone_override, str):
         raise JobPredictionError("zone must be a string when provided.")
 
-    zone = zone_override or _resolve_zone(parsed_sbatch)
+    zone = zone_override or _resolve_zone(resolved_nodelist, parsed_sbatch)
 
     return {
         "cpu_cores": cpu_cores,
@@ -90,6 +107,10 @@ def _parse_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "memory_gigabytes": memory_gigabytes,
         "walltime_hours": walltime_hours,
         "zone": zone,
+        "resolved_nodelist": resolved_nodelist,
+        "allocated_node_names": allocated_node_names,
+        "allocated_node_cpu_cores": _build_allocated_node_cpu_core_list(allocated_node_names),
+        "missing_inventory_node_names": node_inventory_aggregation.missing_node_names,
     }
 
 
@@ -116,10 +137,44 @@ def _calculate_total_memory_gigabytes(
     return None
 
 
-def _resolve_zone(parsed_sbatch: Optional[SbatchParameters]) -> str:
-    node_list = parsed_sbatch.nodelist if parsed_sbatch else None
+def _resolve_zone(
+    resolved_nodelist: Optional[str],
+    parsed_sbatch: Optional[SbatchParameters],
+) -> str:
+    node_list = resolved_nodelist or (parsed_sbatch.nodelist if parsed_sbatch else None)
     node_prefix = get_node_prefix(node_list) if node_list else None
     return get_zone_for_node_prefix(node_prefix)
+
+
+def _resolve_nodelist(
+    parameters: Dict[str, Any],
+    parsed_sbatch: Optional[SbatchParameters],
+) -> Optional[str]:
+    parameter_nodelist = parameters.get("nodelist")
+    if parameter_nodelist is not None:
+        if not isinstance(parameter_nodelist, str):
+            raise JobPredictionError("Invalid string value in request.")
+        if parameter_nodelist.strip():
+            return parameter_nodelist.strip()
+
+    if parsed_sbatch and parsed_sbatch.nodelist:
+        return parsed_sbatch.nodelist
+
+    runtime_nodelist = get_slurm_env_vars().get("nodelist")
+    if runtime_nodelist and runtime_nodelist.strip():
+        return runtime_nodelist.strip()
+
+    return None
+
+
+def _build_allocated_node_cpu_core_list(allocated_node_names: List[str]) -> Optional[List[int]]:
+    allocated_node_cpu_cores: List[int] = []
+    for node_name in allocated_node_names:
+        profile = lookup_node_profile(node_name)
+        if profile is None:
+            continue
+        allocated_node_cpu_cores.append(max(profile.cpu_core_count, 0))
+    return allocated_node_cpu_cores or None
 
 
 def _coalesce_int(*values: Optional[Any]) -> Optional[int]:
@@ -164,11 +219,18 @@ def _build_prediction_response(inputs: Dict[str, Any]) -> Dict[str, Any]:
         inputs["memory_gigabytes"],
         inputs["walltime_hours"],
         carbon_intensity,
+        allocated_node_cpu_cores=inputs.get("allocated_node_cpu_cores"),
     )
 
     notes = []
     if inputs.get("gpu_count", 0) > 0:
         notes.append("GPU power is not included in the current power model.")
+    if inputs.get("missing_inventory_node_names"):
+        notes.append(
+            "Node inventory lookup missing for: "
+            + ", ".join(inputs["missing_inventory_node_names"])
+            + ". Generic fallback assumptions were used."
+        )
 
     return {
         "energy_kwh": results["energy_kwh"],
@@ -176,6 +238,7 @@ def _build_prediction_response(inputs: Dict[str, Any]) -> Dict[str, Any]:
         "emissions_gco2e": results["emissions_gco2e"],
         "power_watts": results["power_watts"],
         "carbon_intensity_gco2e_per_kwh": carbon_intensity,
+        "pue": POWER_USAGE_EFFECTIVENESS,
         "zone": inputs["zone"],
         "calculation_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "inputs": {
@@ -185,6 +248,8 @@ def _build_prediction_response(inputs: Dict[str, Any]) -> Dict[str, Any]:
             "partition_name": inputs["partition_name"],
             "memory_gigabytes": inputs["memory_gigabytes"],
             "walltime_hours": inputs["walltime_hours"],
+            "resolved_nodelist": inputs.get("resolved_nodelist"),
+            "allocated_node_names": inputs.get("allocated_node_names", []),
         },
         "notes": notes,
     }
