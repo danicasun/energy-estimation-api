@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - dependency optional in local t
 class TestJobPredictionApiNodeLookup(unittest.TestCase):
     @patch("slurm_runtime._expand_with_scontrol", return_value=[])
     @patch("job_prediction_api.get_slurm_env_vars", return_value={"nodelist": None})
-    def test_parse_payload_infers_cpu_cores_from_node_inventory(
+    def test_parse_payload_distributes_allocated_cpu_cores_per_node(
         self,
         _: object,
         __: object,
@@ -26,6 +26,8 @@ class TestJobPredictionApiNodeLookup(unittest.TestCase):
                 [
                     "#!/bin/bash",
                     "#SBATCH --nodelist=sh02-01n[61-62]",
+                    "#SBATCH --cpus-per-task=8",
+                    "#SBATCH --ntasks=4",
                     "#SBATCH --time=10:00",
                 ]
             ),
@@ -35,8 +37,8 @@ class TestJobPredictionApiNodeLookup(unittest.TestCase):
         parsed_inputs = _parse_request_payload(payload)
 
         self.assertEqual(parsed_inputs["allocated_node_names"], ["sh02-01n61", "sh02-01n62"])
-        self.assertEqual(parsed_inputs["allocated_node_cpu_cores"], [20, 20])
-        self.assertEqual(parsed_inputs["cpu_cores"], 40)
+        self.assertEqual(parsed_inputs["allocated_node_cpu_cores"], [16, 16])
+        self.assertEqual(parsed_inputs["cpu_cores"], 32)
         self.assertEqual(parsed_inputs["node_count"], 2)
 
     @patch("job_prediction_api.get_carbon_intensity", return_value=400.0)

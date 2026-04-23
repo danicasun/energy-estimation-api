@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from energy_constants import POWER_USAGE_EFFECTIVENESS
 from electricitymaps import get_carbon_intensity
-from node_inventory import aggregate_allocated_nodes, lookup_node_profile
+from node_inventory import aggregate_allocated_nodes
 from power_model import estimate_emissions
 from sbatch_parser import SbatchParameters, parse_sbatch_text
 from slurm_runtime import expand_slurm_nodelist, get_node_prefix, get_slurm_env_vars
@@ -62,9 +62,6 @@ def _parse_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     node_inventory_aggregation = aggregate_allocated_nodes(allocated_node_names)
 
     inferred_cpu_cores = _calculate_total_cpu_cores(parsed_sbatch)
-    if inferred_cpu_cores is None and node_inventory_aggregation.total_cpu_cores > 0:
-        inferred_cpu_cores = node_inventory_aggregation.total_cpu_cores
-
     cpu_cores = _coalesce_int(parameters.get("cpuCores"), inferred_cpu_cores, 1)
 
     inferred_gpu_count = parsed_sbatch.gpu_count if parsed_sbatch else None
@@ -109,7 +106,10 @@ def _parse_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "zone": zone,
         "resolved_nodelist": resolved_nodelist,
         "allocated_node_names": allocated_node_names,
-        "allocated_node_cpu_cores": _build_allocated_node_cpu_core_list(allocated_node_names),
+        "allocated_node_cpu_cores": _build_allocated_node_cpu_core_list(
+            allocated_node_names=allocated_node_names,
+            total_allocated_cpu_cores=cpu_cores,
+        ),
         "missing_inventory_node_names": node_inventory_aggregation.missing_node_names,
     }
 
@@ -167,14 +167,25 @@ def _resolve_nodelist(
     return None
 
 
-def _build_allocated_node_cpu_core_list(allocated_node_names: List[str]) -> Optional[List[int]]:
-    allocated_node_cpu_cores: List[int] = []
-    for node_name in allocated_node_names:
-        profile = lookup_node_profile(node_name)
-        if profile is None:
-            continue
-        allocated_node_cpu_cores.append(max(profile.cpu_core_count, 0))
-    return allocated_node_cpu_cores or None
+def _build_allocated_node_cpu_core_list(
+    allocated_node_names: List[str],
+    total_allocated_cpu_cores: int,
+) -> Optional[List[int]]:
+    if not allocated_node_names:
+        return None
+
+    node_count = len(allocated_node_names)
+    if node_count <= 0:
+        return None
+
+    # Distribute allocated CPU cores across resolved nodes (cores units).
+    base_cpu_cores_per_node = total_allocated_cpu_cores // node_count
+    extra_cpu_core_nodes = total_allocated_cpu_cores % node_count
+
+    allocated_node_cpu_cores = [base_cpu_cores_per_node] * node_count
+    for index in range(extra_cpu_core_nodes):
+        allocated_node_cpu_cores[index] += 1
+    return allocated_node_cpu_cores
 
 
 def _coalesce_int(*values: Optional[Any]) -> Optional[int]:
