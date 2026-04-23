@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 def get_slurm_env_vars() -> Dict[str, Optional[str]]:
@@ -136,4 +136,100 @@ def get_node_prefix(nodelist: Optional[str] = None) -> Optional[str]:
     prefix = ''.join(c for c in match if not c.isdigit())
     
     return prefix if prefix else None
+
+
+def expand_slurm_nodelist(nodelist: Optional[str]) -> List[str]:
+    """Expand a Slurm nodelist expression into concrete node names."""
+    if not nodelist:
+        return []
+
+    trimmed_nodelist = nodelist.strip()
+    if not trimmed_nodelist:
+        return []
+
+    resolved_nodes = _expand_with_scontrol(trimmed_nodelist)
+    if resolved_nodes:
+        return resolved_nodes
+
+    return _expand_nodelist_fallback(trimmed_nodelist)
+
+
+def _expand_with_scontrol(nodelist: str) -> List[str]:
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "hostnames", nodelist],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _expand_nodelist_fallback(nodelist: str) -> List[str]:
+    expanded_node_names: List[str] = []
+    for token in _split_nodelist_tokens(nodelist):
+        expanded_node_names.extend(_expand_nodelist_token(token))
+    return expanded_node_names
+
+
+def _split_nodelist_tokens(nodelist: str) -> List[str]:
+    tokens: List[str] = []
+    current_token: List[str] = []
+    bracket_depth = 0
+
+    for character in nodelist:
+        if character == "," and bracket_depth == 0:
+            token = "".join(current_token).strip()
+            if token:
+                tokens.append(token)
+            current_token = []
+            continue
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        current_token.append(character)
+
+    trailing_token = "".join(current_token).strip()
+    if trailing_token:
+        tokens.append(trailing_token)
+    return tokens
+
+
+def _expand_nodelist_token(token: str) -> List[str]:
+    if "[" not in token or "]" not in token:
+        return [token]
+
+    prefix, remainder = token.split("[", 1)
+    bracket_content, suffix = remainder.split("]", 1)
+    expanded_suffixes: List[str] = []
+
+    for bracket_segment in bracket_content.split(","):
+        trimmed_segment = bracket_segment.strip()
+        if not trimmed_segment:
+            continue
+        if "-" in trimmed_segment:
+            start_raw, end_raw = trimmed_segment.split("-", 1)
+            if not start_raw.isdigit() or not end_raw.isdigit():
+                continue
+            width = max(len(start_raw), len(end_raw))
+            start_value = int(start_raw)
+            end_value = int(end_raw)
+            if end_value < start_value:
+                continue
+            for value in range(start_value, end_value + 1):
+                expanded_suffixes.append(str(value).zfill(width))
+        else:
+            expanded_suffixes.append(trimmed_segment)
+
+    if not expanded_suffixes:
+        return [token]
+
+    return [f"{prefix}{expanded_suffix}{suffix}" for expanded_suffix in expanded_suffixes]
 

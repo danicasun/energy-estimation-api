@@ -1,6 +1,8 @@
 """Power consumption and emissions calculation model."""
 
-from typing import Optional
+from typing import Dict, List, Optional
+
+from energy_constants import POWER_USAGE_EFFECTIVENESS
 
 
 # Power model constants (Watts)
@@ -37,9 +39,10 @@ def calculate_energy(power_watts: float, hours: float) -> float:
         hours: Duration in hours
         
     Returns:
-        Energy consumption in kWh
+        Facility energy consumption in kWh (IT energy multiplied by PUE)
     """
-    return (power_watts * hours) / 1000.0
+    it_energy_kwh = (power_watts * hours) / 1000.0
+    return it_energy_kwh * POWER_USAGE_EFFECTIVENESS
 
 
 def calculate_emissions(energy_kwh: float, carbon_intensity: float) -> float:
@@ -56,12 +59,41 @@ def calculate_emissions(energy_kwh: float, carbon_intensity: float) -> float:
     return energy_kwh * carbon_intensity
 
 
+def calculate_aggregate_node_power(
+    allocated_node_cpu_cores: List[int],
+    total_memory_gigabytes: float,
+) -> float:
+    """
+    Calculate aggregate power across allocated nodes in Watts.
+
+    Memory in GB is distributed proportional to node CPU core counts.
+    """
+    if not allocated_node_cpu_cores:
+        return calculate_power(0, total_memory_gigabytes)
+
+    sanitized_cpu_core_counts = [max(int(cpu_cores), 0) for cpu_cores in allocated_node_cpu_cores]
+    total_allocated_cpu_cores = sum(sanitized_cpu_core_counts)
+    allocated_node_count = len(sanitized_cpu_core_counts)
+
+    if total_allocated_cpu_cores <= 0:
+        memory_per_node_gigabytes = total_memory_gigabytes / max(allocated_node_count, 1)
+        return sum(calculate_power(0, memory_per_node_gigabytes) for _ in sanitized_cpu_core_counts)
+
+    aggregate_power_watts = 0.0
+    for node_cpu_core_count in sanitized_cpu_core_counts:
+        memory_fraction = node_cpu_core_count / total_allocated_cpu_cores
+        node_memory_gigabytes = total_memory_gigabytes * memory_fraction
+        aggregate_power_watts += calculate_power(node_cpu_core_count, node_memory_gigabytes)
+    return aggregate_power_watts
+
+
 def estimate_emissions(
     cpus: int,
     mem_gb: float,
     hours: float,
-    carbon_intensity: float
-) -> dict:
+    carbon_intensity: float,
+    allocated_node_cpu_cores: Optional[List[int]] = None,
+) -> Dict[str, float]:
     """
     Complete emissions estimation pipeline.
     
@@ -78,7 +110,11 @@ def estimate_emissions(
         - emissions_gco2e: Emissions (g CO₂e)
         - emissions_kgco2e: Emissions (kg CO₂e)
     """
-    power = calculate_power(cpus, mem_gb)
+    power = (
+        calculate_aggregate_node_power(allocated_node_cpu_cores, mem_gb)
+        if allocated_node_cpu_cores
+        else calculate_power(cpus, mem_gb)
+    )
     energy = calculate_energy(power, hours)
     emissions_g = calculate_emissions(energy, carbon_intensity)
     
