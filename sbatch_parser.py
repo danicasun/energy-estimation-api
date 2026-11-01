@@ -19,6 +19,7 @@ class SbatchParameters:
     memory_gigabytes_per_cpu: Optional[float] = None
     walltime_hours: Optional[float] = None
     nodelist: Optional[str] = None
+    ntasks_per_node: Optional[int] = None
 
 
 def parse_walltime_hours(raw_value: str) -> Optional[float]:
@@ -49,7 +50,8 @@ def parse_walltime_hours(raw_value: str) -> Optional[float]:
     hours = 0
     minutes = 0
     seconds = 0
-    if days > 0:
+    has_day_prefix = len(day_split) == 2
+    if has_day_prefix:
         # Slurm with day prefix allows D-HH, D-HH:MM, and D-HH:MM:SS.
         if len(numeric_segments) == 3:
             hours, minutes, seconds = numeric_segments
@@ -92,7 +94,7 @@ def parse_memory_to_gigabytes(raw_value: str) -> Optional[float]:
     except ValueError:
         return None
 
-    unit = unit_part.strip() or "G"
+    unit = unit_part.strip() or "M"
     if unit in {"K", "KB"}:
         return numeric_value / (1024 * 1024)
     if unit in {"M", "MB"}:
@@ -117,51 +119,84 @@ def parse_sbatch_text(sbatch_text: str) -> SbatchParameters:
 
     for directive in directives:
         normalized = directive.replace("#SBATCH", "", 1).strip()
+        flag_name, value = _split_sbatch_flag_and_value(normalized)
+        if flag_name is None:
+            continue
 
-        if normalized.startswith("--partition"):
-            value = _split_sbatch_value(normalized)
+        if flag_name in {"--partition", "-p"}:
             parameters.partition_name = value or parameters.partition_name
 
-        if normalized.startswith("--nodes"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name in {"--nodes", "-N"}:
             parameters.node_count = _parse_int(value, parameters.node_count)
 
-        if normalized.startswith("--ntasks"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name == "--ntasks-per-node":
+            parameters.ntasks_per_node = _parse_int(value, parameters.ntasks_per_node)
+
+        elif flag_name in {"--ntasks", "-n"}:
             parameters.task_count = _parse_int(value, parameters.task_count)
 
-        if normalized.startswith("--cpus-per-task"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name in {"--cpus-per-task", "-c"}:
             parameters.cpu_cores_per_task = _parse_int(value, parameters.cpu_cores_per_task)
 
-        if normalized.startswith("--gres"):
-            gpu_count = _parse_gres_gpu_count(normalized)
+        elif flag_name == "--gres":
+            gpu_count = _parse_gpu_count_value(value)
             if gpu_count is not None:
                 parameters.gpu_count = gpu_count
 
-        if normalized.startswith("--mem-per-cpu"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name in {"--gpus", "-G"}:
+            gpu_count = _parse_gpu_count_value(value)
+            if gpu_count is not None:
+                parameters.gpu_count = gpu_count
+
+        elif flag_name == "--mem-per-cpu":
             mem_per_cpu = parse_memory_to_gigabytes(value) if value else None
             if mem_per_cpu is not None:
                 parameters.memory_gigabytes_per_cpu = mem_per_cpu
 
-        if normalized.startswith("--mem"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name == "--mem":
             mem_total = parse_memory_to_gigabytes(value) if value else None
             if mem_total is not None:
                 parameters.memory_gigabytes_total = mem_total
 
-        if normalized.startswith("--time"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name in {"--time", "-t"}:
             walltime_hours = parse_walltime_hours(value) if value else None
             if walltime_hours is not None:
                 parameters.walltime_hours = walltime_hours
 
-        if normalized.startswith("--nodelist"):
-            value = _split_sbatch_value(normalized)
+        elif flag_name in {"--nodelist", "-w"}:
             parameters.nodelist = value or parameters.nodelist
 
     return parameters
+
+
+def _split_sbatch_flag_and_value(normalized_directive: str) -> tuple[Optional[str], Optional[str]]:
+    """Split a directive into the exact flag name and its value."""
+    trimmed_directive = normalized_directive.strip()
+    if not trimmed_directive.startswith("-"):
+        return None, None
+
+    if trimmed_directive.startswith("--"):
+        flag_body = trimmed_directive[2:]
+        if not flag_body:
+            return None, None
+        if "=" in flag_body:
+            flag_name, raw_value = flag_body.split("=", 1)
+            stripped_value = raw_value.strip()
+            return f"--{flag_name.strip()}", stripped_value or None
+        spaced_parts = flag_body.split(None, 1)
+        flag_name = spaced_parts[0]
+        raw_value = spaced_parts[1].strip() if len(spaced_parts) > 1 else None
+        return f"--{flag_name}", raw_value or None
+
+    if len(trimmed_directive) < 2 or not trimmed_directive[1].isalpha():
+        return None, None
+
+    flag_name = f"-{trimmed_directive[1]}"
+    remainder = trimmed_directive[2:]
+    if remainder.startswith("="):
+        remainder = remainder[1:]
+    remainder = remainder.strip()
+    return flag_name, remainder or None
 
 
 def _split_sbatch_value(normalized_directive: str) -> Optional[str]:
@@ -187,13 +222,22 @@ def _parse_int(raw_value: Optional[str], fallback: Optional[int]) -> Optional[in
 
 def _parse_gres_gpu_count(normalized_directive: str) -> Optional[int]:
     # Examples: --gres=gpu:4, --gres=gpu:V100:4
-    directive = normalized_directive.replace("--gres", "", 1).strip()
-    parts = directive.split("=", 1)
-    gres_value = parts[1] if len(parts) == 2 else (parts[0] if parts else "")
-    if "gpu" not in gres_value:
+    _, gres_value = _split_sbatch_flag_and_value(normalized_directive)
+    return _parse_gpu_count_value(gres_value)
+
+
+def _parse_gpu_count_value(raw_value: Optional[str]) -> Optional[int]:
+    if raw_value is None:
+        return None
+    trimmed_value = raw_value.strip()
+    if not trimmed_value:
+        return None
+    if trimmed_value.isdigit():
+        return int(trimmed_value)
+    if "gpu" not in trimmed_value:
         return None
 
-    segments = gres_value.split(":")
+    segments = trimmed_value.split(":")
     for segment in reversed(segments):
         if segment.isdigit():
             return int(segment)

@@ -6,3 +6,10 @@ __pycache__/
 .env.*
 .vercel
 .env*.local
+
+# Historical Slurm exports contain researcher usernames.
+slurm_march_to_october data/
+
+# Fitted model JSON outputs (keep vercel.json tracked).
+*.json
+!vercel.json

@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from energy_constants import POWER_USAGE_EFFECTIVENESS
 from utils import parse_memory, convert_energy_to_kwh
 
 
@@ -77,10 +76,8 @@ def fit_energy_model_log(csv_path: str, model_out_path: str = "energy_model_log.
     df["mem_gb_per_cpu"] = df["ReqMem"].apply(parse_memory)
     df["mem_gb_total"] = df["mem_gb_per_cpu"] * df["NCPUS"]
 
-    # ----- Convert energy target to facility kWh using PUE -----
-    df["energy_kwh"] = (
-        df["ConsumedEnergyRaw"].apply(convert_energy_to_kwh) * POWER_USAGE_EFFECTIVENESS
-    )
+    # ----- Convert measured IT energy to kWh (PUE is applied at prediction time) -----
+    df["energy_kwh"] = df["ConsumedEnergyRaw"].apply(convert_energy_to_kwh)
 
     # ----- Filter by minimum energy threshold -----
     if min_energy > 0:
